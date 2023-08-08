@@ -2,11 +2,13 @@ package com.example.camera2ex
 
 import ImageSaver
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.*
 import android.hardware.camera2.*
+import android.hardware.camera2.params.MeteringRectangle
 import android.media.ImageReader
 import android.media.MediaPlayer
 import android.os.Bundle
@@ -19,6 +21,7 @@ import android.view.*
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.MutableLiveData
 import com.example.camera2ex.databinding.FragmentCameraBinding
 import java.lang.Long
 import java.util.*
@@ -27,6 +30,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.Array
 import kotlin.Boolean
 import kotlin.Comparator
+import kotlin.Float
 import kotlin.Int
 import kotlin.NullPointerException
 import kotlin.RuntimeException
@@ -36,14 +40,15 @@ import kotlin.also
 import kotlin.apply
 import kotlin.arrayOf
 import kotlin.let
+import kotlin.math.max
 import kotlin.toString
 import kotlin.with
-import java.util.Queue as Queue1
 
 
 class CameraFragment : Fragment() {
 
     private lateinit var binding: FragmentCameraBinding
+    private lateinit var objectDetectionModule: ObjectDetectionModule
 
     /**
      * TextureView를 사용 가능 한 지와 이와 관련된 surface에 관해 호출되는 리스너
@@ -61,12 +66,18 @@ class CameraFragment : Fragment() {
         }
 
         // surfaceTexture가 소멸되려 함
-        override fun onSurfaceTextureDestroyed(p0: SurfaceTexture): Boolean {
+        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
             return true
         }
 
         // surfaceTexture가 업데이트 됨
-        override fun onSurfaceTextureUpdated(p0: SurfaceTexture) {}
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+            // TODO: 객체 인식해야 함
+            val newBitmap = binding.texture.bitmap?.let {
+                objectDetectionModule.runObjectDetection(it)
+            }
+            binding.imageView.setImageBitmap(newBitmap)
+        }
     }
 
     /**
@@ -117,14 +128,6 @@ class CameraFragment : Fragment() {
 //        var preAfState = 0;
 
         private fun process(result: CaptureResult) {
-
-//            var afState = result.get(CaptureResult.CONTROL_AF_STATE)
-//
-//            if(afState != preState && preAfState != afState) {
-//                Log.d("process check", afState.toString() + " | " + state)
-//                preAfState = afState!!
-//                preState = state
-//            }
 
             when (state) {
                 // 프리뷰 상태
@@ -195,6 +198,7 @@ class CameraFragment : Fragment() {
     private var backgroundHandler: Handler? = null
 
     private var imageReader: ImageReader? = null
+    private var imageSaver: ImageSaver? = null
 
     private lateinit var previewRequestBuilder: CaptureRequest.Builder
     private lateinit var previewRequest: CaptureRequest
@@ -211,44 +215,39 @@ class CameraFragment : Fragment() {
 
     private lateinit var mediaPlayer: MediaPlayer
 
+    public var pictureCount = MutableLiveData<Int>(0)
+
     /**
      * This a callback object for the [ImageReader]. "onImageAvailable" will be called when a
      * still image is ready to be saved.
      */
     private val onImageAvailableListener = ImageReader.OnImageAvailableListener {
-        backgroundHandler?.post(ImageSaver(it.acquireNextImage(), requireContext()))
+        imageSaver = ImageSaver(it.acquireNextImage(), requireContext(), pictureCount)
+        backgroundHandler?.post(imageSaver!!)
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?,
     ): View {
 
         binding = FragmentCameraBinding.inflate(inflater, container, false)
+        objectDetectionModule = ObjectDetectionModule(requireContext())
 
         mediaPlayer = MediaPlayer.create(context, R.raw.end_sound)
 
-//        binding.focus3.setOnClickListener {
-//            PICTURE_SIZE = 1
-//            val queue = ArrayDeque<Float>()
-//            queue.add(3f)
-//            setFocusDistance(queue)
-//        }
-//
-//        binding.focus5.setOnClickListener {
-//            PICTURE_SIZE = 1
-//            val queue = ArrayDeque<Float>()
-//            queue.add(5f)
-//            setFocusDistance(queue)
-//        }
-//
-//        binding.autoBtn.setOnClickListener {
-//            PICTURE_SIZE = 1
-////            Log.d("렌즈 초점 결과", "autoBtn on Click")
-////            setAutoFocus()
-//            lockFocus()
-//        }
-//
+        // preview 이벤트 리스너 등록
+        binding.texture.setOnTouchListener { view, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    setTouchPointDistanceChange(event.x, event.y)
+                    return@setOnTouchListener true
+                }
+                else -> return@setOnTouchListener false
+            }
+        }
+
         binding.burstPicture.setOnClickListener {
             PICTURE_SIZE = 3
             lockFocus()
@@ -271,6 +270,16 @@ class CameraFragment : Fragment() {
         binding.picture.setOnClickListener {
             PICTURE_SIZE = 1
             lockFocus()
+        }
+
+
+        pictureCount.observe(viewLifecycleOwner) {
+            if(it >= PICTURE_SIZE) {
+//                setAutoFocus()
+                mediaPlayer.start()
+                Toast.makeText(requireContext(), "촬영 완료", Toast.LENGTH_SHORT).show()
+                pictureCount.value = 0
+            }
         }
 
         return binding.root
@@ -368,7 +377,7 @@ class CameraFragment : Fragment() {
                     Arrays.asList(*map.getOutputSizes(ImageFormat.JPEG)), CompareSizesByArea()
                 )
                 // 선택된 해상도로 ImageReader 설정 -> JPEG으로, width, height는 가장 크게
-                //TODO: MaxImages : 최대 저장 개수? 알아보기
+                //TODO: MaxImages : 최대 저장 개수 알아보기
                 imageReader = ImageReader.newInstance(
                     largest.width, largest.height,
                     ImageFormat.JPEG, /*maxImages*/ 10
@@ -415,9 +424,7 @@ class CameraFragment : Fragment() {
 
                 this.cameraId = cameraId
 
-                // TODO: 렌즈 LENS_INFO_MINIMUM_FOCUS_DISTANCE 값 알아오기 (최대값 = 변수 등록)
-
-                // 최소 초점 거리
+                // 렌즈 LENS_INFO_MINIMUM_FOCUS_DISTANCE 값 알아오기 (최대값 = 변수 등록) : 최대 초점 거리
                 minimumFocusDistance = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)!!
 
                 return
@@ -444,7 +451,7 @@ class CameraFragment : Fragment() {
 
         if (Surface.ROTATION_90 == rotation || Surface.ROTATION_270 == rotation) {
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
-            val scale = Math.max(
+            val scale = max(
                 viewHeight.toFloat() / previewSize.height,
                 viewWidth.toFloat() / previewSize.width
             )
@@ -582,22 +589,12 @@ class CameraFragment : Fragment() {
                 // We have to take that into account and rotate JPEG properly.
                 // For devices with orientation of 90, we return our mapping from ORIENTATIONS.
                 // For devices with orientation of 270, we need to rotate the JPEG 180 degrees.
-                set(
-                    CaptureRequest.JPEG_ORIENTATION,
-                    (ORIENTATIONS.get(rotation!!) + sensorOrientation + 270) % 360
-                )
+                set(CaptureRequest.JPEG_ORIENTATION, 90)
 
                 // Use the same AE and AF modes as the preview.
 
-                // TODO: 렌즈 focus 변경 함수 (5.0f로 초점 변경)
                 if(value != null) {
-//                    var focusDistanceValue = value.peek()
-//                    if (focusDistanceValue > minimumFocusDistance) {
-//                        focusDistanceValue = minimumFocusDistance
-//                    }
-
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-//                    set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistanceValue)
                 }
                 else {
                     set(CaptureRequest.CONTROL_AF_MODE,
@@ -617,15 +614,13 @@ class CameraFragment : Fragment() {
 
                     val distanceResult =  result.get(CaptureResult.LENS_FOCUS_DISTANCE)
 
-                    Toast.makeText(requireContext(), "렌즈 초점 결과: " +distanceResult.toString(), Toast.LENGTH_SHORT).show()
-                    Log.d("렌즈 초점 결과", distanceResult.toString())
+//                    Toast.makeText(requireContext(), "렌즈 초점 결과: " +distanceResult.toString(), Toast.LENGTH_SHORT).show()
+//                    Log.d("렌즈 초점 결과", distanceResult.toString())
                     if(value != null && distanceResult == 10f) {
                         setAutoFocus()
-                        mediaPlayer.start()
                     }
                     else {
                         unlockFocus()
-                        mediaPlayer.start()
                     }
 
                 }
@@ -636,11 +631,15 @@ class CameraFragment : Fragment() {
                 abortCaptures()
 
                 val captureRequestList = mutableListOf<CaptureRequest>()
+
+                // 자동 초섬
                 if(value == null) {
                     for (i in 0 until PICTURE_SIZE) {
                         captureBuilder?.let { captureRequestList.add(it.build()) }
                     }
                 }
+
+                // 수동 초점 (디스턴스 촬영)
                 else {
                     while (value.isNotEmpty()) {
                         captureBuilder?.set(CaptureRequest.LENS_FOCUS_DISTANCE, value.poll())
@@ -650,12 +649,33 @@ class CameraFragment : Fragment() {
 
                 // Capture the burst of images
                 captureBurst(captureRequestList, captureCallback, null)
-//                capture(captureBuilder?.build()!!, captureCallback, null)
             }
         } catch (e: CameraAccessException) {
             Log.e(TAG, e.toString())
         }
 
+    }
+
+    private fun getJpegOrientation(
+        c: CameraCharacteristics,
+        deviceOrientation: Int,
+    ): Int {
+        var deviceOrientation = deviceOrientation
+        if (deviceOrientation == OrientationEventListener.ORIENTATION_UNKNOWN) return 0
+        val sensorOrientation =
+            c.get(CameraCharacteristics.SENSOR_ORIENTATION)!!
+
+        // Round device orientation to a multiple of 90
+        deviceOrientation = (deviceOrientation + 45) / 90 * 90
+
+        // Reverse device orientation for front-facing cameras
+        val facingFront =
+            c.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+        if (facingFront) deviceOrientation = -deviceOrientation
+
+        // Calculate desired JPEG orientation relative to camera orientation to make
+        // the image upright relative to the device orientation
+        return (sensorOrientation + deviceOrientation + 360) % 360
     }
 
 
@@ -699,7 +719,6 @@ class CameraFragment : Fragment() {
 
         state = STATE_PICTURE_TAKEN
 
-        // TODO: 렌즈 focus 변경 함수 (5.0f로 초점 변경)
         var focusDistanceValue = value.peek()
         if (focusDistanceValue > minimumFocusDistance) {
             focusDistanceValue = minimumFocusDistance
@@ -748,6 +767,73 @@ class CameraFragment : Fragment() {
             captureCallback, backgroundHandler
         )
     }
+private fun setTouchPointDistanceChange(x: Float, y: Float) {
+
+    val manager = activity?.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    // 카메라 정보 알아내기
+    val characteristics = manager.getCameraCharacteristics(cameraId)
+
+    val sensorArraySize: Rect? =
+        characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+
+    // 초점을 주고 싶은 반경 설정
+    val halfTouchWidth = 150
+    val halfTouchHeight = 150
+
+    val focusAreaTouch = MeteringRectangle(
+        max(
+            (y * (sensorArraySize!!.width() / binding.texture.height) - halfTouchWidth).toInt(), 0
+        ),
+        max(
+            ((binding.texture.width - x) * (sensorArraySize.height() / binding.texture.width) - halfTouchHeight).toInt(),
+            0
+        ),
+
+        halfTouchWidth * 2,
+        halfTouchHeight * 2,
+        MeteringRectangle.METERING_WEIGHT_MAX - 1
+    )
+
+    val captureCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult,
+        ) {
+            //the focus trigger is complete -
+            //resume repeating (preview surface will get frames), clear AF trigger
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, null)
+            captureSession?.setRepeatingRequest(previewRequestBuilder.build(), null, null)
+
+        }
+    }
+
+    // 모든 캡처 정보를 삭제
+    captureSession?.stopRepeating()
+
+    // 초점 변경을 위한 AF 모드 off
+    previewRequestBuilder.set(
+        CaptureRequest.CONTROL_AF_TRIGGER,
+        CameraMetadata.CONTROL_AF_TRIGGER_CANCEL
+    )
+    previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+    captureSession?.capture(previewRequestBuilder.build(), captureCallback, backgroundHandler)
+
+    // 터치 위치로 초점 변경
+    previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(focusAreaTouch))
+
+    // AF 모드 다시 설정 - 안하면 초점 변경 안됨
+    previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+    previewRequestBuilder.set(
+        CaptureRequest.CONTROL_AF_TRIGGER,
+        CameraMetadata.CONTROL_AF_TRIGGER_START
+    )
+    previewRequestBuilder.setTag("FOCUS_TAG"); //we'll capture this later for resuming the preview
+
+    //then we ask for a single request (not repeating!)
+    captureSession?.capture(previewRequestBuilder.build(), captureCallback, backgroundHandler);
+
+}
 
 
     companion object {

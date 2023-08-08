@@ -3,12 +3,21 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.media.Image
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import androidx.lifecycle.MutableLiveData
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.*
@@ -24,13 +33,20 @@ internal class ImageSaver(
     /**
      * The context to access file operations and content resolver.
      */
-    private val context: Context
+    private val context: Context,
+
+    private var pictureCount: MutableLiveData<Int>
+
 ) : Runnable {
 
     override fun run() {
         val bitmap = imageToBitmap(image) // Image to Bitmap
         saveImageToGallery(bitmap) // Save Bitmap to Gallery
         image.close() // Close the Image
+
+        CoroutineScope(Dispatchers.Main).launch {
+            pictureCount.value = pictureCount.value!! + 1
+        }
     }
 
     // Convert Image to Bitmap
@@ -38,7 +54,27 @@ internal class ImageSaver(
         val buffer = image.planes[0].buffer
         val bytes = ByteArray(buffer.remaining())
         buffer.get(bytes)
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+
+        var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+
+        val matrix = bitmapRotation(bytes , 1)
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
+    fun bitmapRotation(byteArray: ByteArray, value: Int) : Matrix {
+        val inputStream: InputStream = ByteArrayInputStream(byteArray)
+
+        val exif = ExifInterface(inputStream)
+        val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_UNDEFINED)
+
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f * value)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f * value)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f * value)
+            else -> matrix.postRotate(0f)
+        }
+        return matrix
     }
 
     // Save Bitmap to Gallery

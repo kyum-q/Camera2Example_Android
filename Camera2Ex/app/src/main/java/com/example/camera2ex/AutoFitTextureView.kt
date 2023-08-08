@@ -18,6 +18,7 @@ package com.example.camera2ex
 
 import android.content.Context
 import android.util.AttributeSet
+import android.view.MotionEvent
 import android.view.TextureView
 import android.view.View
 
@@ -64,5 +65,4 @@ class AutoFitTextureView @JvmOverloads constructor(
             }
         }
     }
-
 }
