@@ -14,10 +14,11 @@ class ObjectDetectionModule(
    val context: Context
 ) {
 
+    private lateinit var detectionResult: List<DetectionResult>
     private lateinit var customObjectDetector: ObjectDetector
     private lateinit var faceDetector: FaceDetector
-
-
+    private var isGetDetectionResult = false
+    var detectionResultIndex = 0
     init {
         setDetecter()
     }
@@ -30,9 +31,10 @@ class ObjectDetectionModule(
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
             .enableTracking()
             .build()
+
         faceDetector = FaceDetection.getClient(highAccuracyOpts)
 
-        // Step 2: Initialize the detector object
+        // Initialize the detector object
         val options = ObjectDetector.ObjectDetectorOptions.builder()
             .setMaxResults(5)          // 최대 결과 (모델에서 감지해야 하는 최대 객체 수)
             .setScoreThreshold(0.5f)    // 점수 임계값 (감지된 객체를 반환하는 객체 감지기의 신뢰도)
@@ -48,33 +50,34 @@ class ObjectDetectionModule(
     /**
      * runObjectDetection(bitmap: Bitmap)
      *      TFLite Object Detection function
-     *      사진 속 객체를 감지하고, 감지된 객체에 boundingBox와 category를 적고 화면에 띄운다.
-     *      또한, category를 classification List에 추가해준다. (분류에 도움을 줌)
+     *      사진 속 객체를 감지하고, 감지된 객체에 boundingBox를 표시해 반환한다.
      */
-    public fun runObjectDetection(bitmap: Bitmap): Bitmap {
+    fun runObjectDetection(bitmap: Bitmap): Bitmap {
 
-        // Object Detection
-        val resultToDisplay = getObjectDetection(bitmap)
+        if(!isGetDetectionResult) {
+            // Object Detection
+            detectionResult = getObjectDetection(bitmap)
+        }
 
         // ObjectDetection 결과(bindingBox) 그리기
         val objectDetectionResult =
-            drawDetectionResult(bitmap, resultToDisplay)
+            drawDetectionResult(bitmap, detectionResult)
 
         return objectDetectionResult!!
     }
 
     /**
      * getObjectDetection(bitmap: Bitmap):
-     *         ObjectDetection 결과(bindingBox) 및 category 그리기
+     *         ObjectDetection 결과(bindingBox)를 반환한다.
      */
     private fun getObjectDetection(bitmap: Bitmap): List<DetectionResult> {
         // Step 1: Create TFLite's TensorImage object
         val image = TensorImage.fromBitmap(bitmap)
 
-        // Step 3: Feed given image to the detector
+        // Step 2: Feed given image to the detector
         val results = customObjectDetector.detect(image)
 
-        // Step 4: Parse the detection result and show it
+        // Step 3: Parse the detection result and show it
         val resultToDisplay = results.map {
             // Get the top-1 category and craft the display text
             val category = it.categories.first()
@@ -88,7 +91,7 @@ class ObjectDetectionModule(
 
     /**
      * drawDetectionResult(bitmap: Bitmap, detectionResults: List<DetectionResult>
-     *      Draw a box around each objects and show the object's name.
+     *      객체 분석 된 boundingBox에 맞춰 이미지 위에 표시한 후 표시된 이미지를 반환한다.
      */
     private fun drawDetectionResult(
         bitmap: Bitmap,
@@ -100,18 +103,39 @@ class ObjectDetectionModule(
         pen.textAlign = Paint.Align.LEFT
 
         detectionResults.forEach {
-                // draw bounding box
-
-                pen.color = Color.parseColor("#B8C5BB")
-                pen.strokeWidth = 10F
-                pen.style = Paint.Style.STROKE
-                val box = it.boundingBox
-                canvas.drawRoundRect(box, 10F, 10F, pen)
-
-                val tagSize = Rect(0, 0, 0, 0)
+            // draw bounding box
+            pen.color = Color.parseColor("#B8C5BB")
+            pen.strokeWidth = 10F
+            pen.style = Paint.Style.STROKE
+            val box = it.boundingBox
+            canvas.drawRoundRect(box, 10F, 10F, pen)
         }
         return outputBitmap
     }
 
+    fun getDetectionResult() : DetectionResult? {
+
+        if(detectionResult.size > detectionResultIndex) {
+            isGetDetectionResult = true
+            return detectionResult[detectionResultIndex++]
+        }
+        else {
+            resetDetectionResult()
+            return null
+        }
+    }
+
+    fun resetDetectionResult() {
+        isGetDetectionResult = false
+        detectionResultIndex = 0
+    }
+
+    fun getIsDetectionStop() : Boolean {
+        return isGetDetectionResult
+    }
+
+    fun getIsDetectionSize() : Int {
+        return detectionResult.size
+    }
 }
 data class DetectionResult(val boundingBox: RectF, val text: String)

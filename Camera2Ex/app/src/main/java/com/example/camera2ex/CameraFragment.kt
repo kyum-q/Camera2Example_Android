@@ -14,6 +14,7 @@ import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.LayoutDirection
 import android.util.Log
 import android.util.Size
 import android.util.SparseIntArray
@@ -72,11 +73,13 @@ class CameraFragment : Fragment() {
 
         // surfaceTexture가 업데이트 됨
         override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
-            // TODO: 객체 인식해야 함
-            val newBitmap = binding.texture.bitmap?.let {
-                objectDetectionModule.runObjectDetection(it)
+            if (isDetectionChecked) {
+                // 객체 인식 코드 호출
+                val newBitmap = binding.texture.bitmap?.let {
+                    objectDetectionModule.runObjectDetection(it)
+                }
+                binding.imageView.setImageBitmap(newBitmap)
             }
-            binding.imageView.setImageBitmap(newBitmap)
         }
     }
 
@@ -163,6 +166,8 @@ class CameraFragment : Fragment() {
 //            Log.d("렌즈 초점 결과", "capturePicture 1")
             val afState = result.get(CaptureResult.CONTROL_AF_STATE)
             // CONTROL_AF_STATE 키에 해당되는 것이 없다
+            Log.d("렌즈 초점 결과", "capturePicture : $afState")
+
             if (afState == null) {
 //                Log.d("렌즈 초점 결과", "capturePicture 2")
                 // 캡처 함수
@@ -215,7 +220,11 @@ class CameraFragment : Fragment() {
 
     private lateinit var mediaPlayer: MediaPlayer
 
-    public var pictureCount = MutableLiveData<Int>(0)
+    var pictureCount = MutableLiveData<Int>(0)
+
+    private var isDetectionChecked = false
+
+    private var wantCameraDirection = 0
 
     /**
      * This a callback object for the [ImageReader]. "onImageAvailable" will be called when a
@@ -238,19 +247,48 @@ class CameraFragment : Fragment() {
         mediaPlayer = MediaPlayer.create(context, R.raw.end_sound)
 
         // preview 이벤트 리스너 등록
-        binding.texture.setOnTouchListener { view, event ->
+        binding.texture.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    setTouchPointDistanceChange(event.x, event.y)
+                    setTouchPointDistanceChange(event.x, event.y, 150, 150)
                     return@setOnTouchListener true
                 }
                 else -> return@setOnTouchListener false
             }
         }
 
+        binding.detectionBtn.setOnCheckedChangeListener { _, isChecked ->
+            isDetectionChecked = isChecked
+            if(!isChecked) {
+                binding.imageView.setImageBitmap(null)
+            }
+        }
+
+        binding.changeCameraBtn.setOnCheckedChangeListener { _, isChecked ->
+            wantCameraDirection = if(isChecked) {
+                CameraCharacteristics.LENS_FACING_FRONT // 전면
+            } else {
+                CameraCharacteristics.LENS_FACING_BACK // 후면
+            }
+
+            closeCamera()
+
+            // texture 사용 가능한지 확인
+            if (binding.texture.isAvailable) {
+                // 카메라 열기
+                openCamera(binding.texture.width, binding.texture.height)
+            } else {
+                binding.texture.surfaceTextureListener = surfaceTextureListener
+            }
+        }
+
         binding.burstPicture.setOnClickListener {
-            PICTURE_SIZE = 3
-            lockFocus()
+            if (!isDetectionChecked) {
+                PICTURE_SIZE = 7
+                lockFocus()
+            } else {
+                focusDetectionPictures()
+            }
         }
 
         binding.distancePicture.setOnClickListener {
@@ -274,15 +312,34 @@ class CameraFragment : Fragment() {
 
 
         pictureCount.observe(viewLifecycleOwner) {
-            if(it >= PICTURE_SIZE) {
+            if(!isDetectionChecked && it >= PICTURE_SIZE || isDetectionChecked && it >= objectDetectionModule.getIsDetectionSize()) {
 //                setAutoFocus()
                 mediaPlayer.start()
                 Toast.makeText(requireContext(), "촬영 완료", Toast.LENGTH_SHORT).show()
                 pictureCount.value = 0
+                objectDetectionModule.resetDetectionResult()
             }
         }
 
         return binding.root
+    }
+
+    private fun focusDetectionPictures() {
+        val detectionResult = objectDetectionModule.getDetectionResult()
+
+        PICTURE_SIZE = 1
+        if (detectionResult != null) {
+            val boundingBox = detectionResult.boundingBox
+            val halfTouchWidth = (boundingBox.right - max(boundingBox.left, 0f)) / 2
+            val halfTouchHeight = (boundingBox.bottom - max(boundingBox.top, 0f)) / 2
+
+            setTouchPointDistanceChange(
+                max(max(boundingBox.left, 0f) + halfTouchWidth, 0F),
+                max(max(boundingBox.top, 0f) + halfTouchHeight, 0F),
+                halfTouchWidth.toInt(), halfTouchHeight.toInt()
+            )
+            Toast.makeText(requireContext(), "${detectionResult.text}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onResume() {
@@ -290,6 +347,8 @@ class CameraFragment : Fragment() {
 
         // 메인 스레드를 방해하지 않기 위해 카메라 작업은 새로운 스레드 제작 후 해당 스레드에서 실행
         startBackgroundThread()
+
+        wantCameraDirection = CameraCharacteristics.LENS_FACING_FRONT
 
         // texture 사용 가능한지 확인
         if (binding.texture.isAvailable) {
@@ -337,6 +396,25 @@ class CameraFragment : Fragment() {
     }
 
     /**
+     * Closes the current [CameraDevice].
+     */
+    fun closeCamera() {
+        try {
+            cameraOpenCloseLock.acquire()
+            captureSession?.close()
+            captureSession = null
+            cameraDevice?.close()
+            cameraDevice = null
+            imageReader?.close()
+            imageReader = null
+        } catch (e: InterruptedException) {
+            throw RuntimeException("Interrupted while trying to lock camera closing.", e)
+        } finally {
+            cameraOpenCloseLock.release()
+        }
+    }
+
+    /**
      * 카메라 권한 요청
      */
     private fun requestCameraPermission() {
@@ -361,9 +439,7 @@ class CameraFragment : Fragment() {
 
                 // 렌즈 정보 알아낸 후, 후면 카메라가 아닐 시 continue (이를 통해 처음 켜지는 카메라는 무조건 적으로 후면 카메라)
                 val cameraDirection = characteristics.get(CameraCharacteristics.LENS_FACING)
-                if (cameraDirection != null &&
-                    cameraDirection == CameraCharacteristics.LENS_FACING_FRONT
-                ) {
+                if (cameraDirection == null || cameraDirection == wantCameraDirection) {
                     continue
                 }
 
@@ -532,17 +608,16 @@ class CameraFragment : Fragment() {
      */
     private fun lockFocus() {
         try {
+
+            Log.d("렌즈 초점 결과", "lockFocus : " + previewRequestBuilder.get(CaptureRequest.CONTROL_AF_MODE).toString() )
             if(previewRequestBuilder.get(CaptureRequest.CONTROL_AF_MODE) != CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE) {
                 previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                Log.d("렌즈 초점 결과", "lockFocus : " + previewRequestBuilder.get(CaptureRequest.CONTROL_AF_MODE).toString() )
             }
                 // This is how to tell the camera to lock focus.
-                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER,
-                    CameraMetadata.CONTROL_AF_TRIGGER_START)
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
                 // Tell #captureCallback to wait for the lock.
                 state = STATE_WAITING_LOCK
-                captureSession?.capture(previewRequestBuilder.build(), captureCallback,
-                    backgroundHandler)
+                captureSession?.capture(previewRequestBuilder.build(), captureCallback, backgroundHandler)
 
 
         } catch (e: CameraAccessException) {
@@ -585,25 +660,18 @@ class CameraFragment : Fragment() {
             )?.apply {
                 addTarget(imageReader?.surface!!)
 
-                // Sensor orientation is 90 for most devices, or 270 for some devices (eg. Nexus 5X)
-                // We have to take that into account and rotate JPEG properly.
-                // For devices with orientation of 90, we return our mapping from ORIENTATIONS.
-                // For devices with orientation of 270, we need to rotate the JPEG 180 degrees.
-                set(CaptureRequest.JPEG_ORIENTATION, 90)
+                set(CaptureRequest.JPEG_ORIENTATION, (ORIENTATIONS.get(rotation!!) + sensorOrientation + 270) % 360)
 
                 // Use the same AE and AF modes as the preview.
-
                 if(value != null) {
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
                 }
                 else {
-                    set(CaptureRequest.CONTROL_AF_MODE,
-                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 }
             }?.also {
 //                setAutoFlash(it)
             }
-
 
             val captureCallback = object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
@@ -612,15 +680,18 @@ class CameraFragment : Fragment() {
                     result: TotalCaptureResult,
                 ) {
 
-                    val distanceResult =  result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+                    val distanceResult = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
 
 //                    Toast.makeText(requireContext(), "렌즈 초점 결과: " +distanceResult.toString(), Toast.LENGTH_SHORT).show()
-//                    Log.d("렌즈 초점 결과", distanceResult.toString())
+                    Log.d("렌즈 초점 결과", distanceResult.toString())
                     if(value != null && distanceResult == 10f) {
                         setAutoFocus()
                     }
                     else {
                         unlockFocus()
+                        if(isDetectionChecked) {
+                            focusDetectionPictures()
+                        }
                     }
 
                 }
@@ -632,7 +703,7 @@ class CameraFragment : Fragment() {
 
                 val captureRequestList = mutableListOf<CaptureRequest>()
 
-                // 자동 초섬
+                // 자동 초점
                 if(value == null) {
                     for (i in 0 until PICTURE_SIZE) {
                         captureBuilder?.let { captureRequestList.add(it.build()) }
@@ -655,29 +726,6 @@ class CameraFragment : Fragment() {
         }
 
     }
-
-    private fun getJpegOrientation(
-        c: CameraCharacteristics,
-        deviceOrientation: Int,
-    ): Int {
-        var deviceOrientation = deviceOrientation
-        if (deviceOrientation == OrientationEventListener.ORIENTATION_UNKNOWN) return 0
-        val sensorOrientation =
-            c.get(CameraCharacteristics.SENSOR_ORIENTATION)!!
-
-        // Round device orientation to a multiple of 90
-        deviceOrientation = (deviceOrientation + 45) / 90 * 90
-
-        // Reverse device orientation for front-facing cameras
-        val facingFront =
-            c.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
-        if (facingFront) deviceOrientation = -deviceOrientation
-
-        // Calculate desired JPEG orientation relative to camera orientation to make
-        // the image upright relative to the device orientation
-        return (sensorOrientation + deviceOrientation + 360) % 360
-    }
-
 
     /**
      * 사진 촬영 준비하는 함수 (precaputre 대기 위한 설정)
@@ -745,7 +793,7 @@ class CameraFragment : Fragment() {
                     if (lensState == CaptureResult.LENS_STATE_STATIONARY) {
                         var distanceValue = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
                         // 내가 지정한 바운더리 안에 있는지 확인
-                        if (distanceValue != null && distanceValue > value.peek() - 0.1f
+                        if (distanceValue != null && value.isNotEmpty() && distanceValue > value.peek() - 0.1f
                             && distanceValue < value.peek() + 0.1f
                         ) {
                             Log.d(
@@ -755,8 +803,9 @@ class CameraFragment : Fragment() {
                             captureStillPicture(value)
                         }
                         // 렌즈가 이동 중입니다. 초점이 아직 맞춰지지 않았을 가능성이 있습니다.
-                    } else if (lensState == CaptureResult.LENS_STATE_MOVING) {
                     }
+//                    else if (lensState == CaptureResult.LENS_STATE_MOVING) {
+//                    }
                 }
             }
         }
@@ -767,7 +816,7 @@ class CameraFragment : Fragment() {
             captureCallback, backgroundHandler
         )
     }
-private fun setTouchPointDistanceChange(x: Float, y: Float) {
+private fun setTouchPointDistanceChange(x: Float, y: Float, halfTouchWidth: Int, halfTouchHeight: Int) {
 
     val manager = activity?.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     // 카메라 정보 알아내기
@@ -775,10 +824,6 @@ private fun setTouchPointDistanceChange(x: Float, y: Float) {
 
     val sensorArraySize: Rect? =
         characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-
-    // 초점을 주고 싶은 반경 설정
-    val halfTouchWidth = 150
-    val halfTouchHeight = 150
 
     val focusAreaTouch = MeteringRectangle(
         max(
@@ -802,9 +847,16 @@ private fun setTouchPointDistanceChange(x: Float, y: Float) {
         ) {
             //the focus trigger is complete -
             //resume repeating (preview surface will get frames), clear AF trigger
-            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, null)
-            captureSession?.setRepeatingRequest(previewRequestBuilder.build(), null, null)
+            if(objectDetectionModule.getIsDetectionStop()) {
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, null)
+                captureSession?.setRepeatingRequest(previewRequestBuilder.build(), null, null)
 
+                lockFocus()
+            }
+            else {
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, null)
+                captureSession?.setRepeatingRequest(previewRequestBuilder.build(), null, null)
+            }
         }
     }
 
@@ -812,10 +864,7 @@ private fun setTouchPointDistanceChange(x: Float, y: Float) {
     captureSession?.stopRepeating()
 
     // 초점 변경을 위한 AF 모드 off
-    previewRequestBuilder.set(
-        CaptureRequest.CONTROL_AF_TRIGGER,
-        CameraMetadata.CONTROL_AF_TRIGGER_CANCEL
-    )
+    previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL)
     previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
     captureSession?.capture(previewRequestBuilder.build(), captureCallback, backgroundHandler)
 
@@ -824,14 +873,11 @@ private fun setTouchPointDistanceChange(x: Float, y: Float) {
 
     // AF 모드 다시 설정 - 안하면 초점 변경 안됨
     previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
-    previewRequestBuilder.set(
-        CaptureRequest.CONTROL_AF_TRIGGER,
-        CameraMetadata.CONTROL_AF_TRIGGER_START
-    )
+    previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
     previewRequestBuilder.setTag("FOCUS_TAG"); //we'll capture this later for resuming the preview
 
     //then we ask for a single request (not repeating!)
-    captureSession?.capture(previewRequestBuilder.build(), captureCallback, backgroundHandler);
+    captureSession?.capture(previewRequestBuilder.build(), captureCallback, backgroundHandler)
 
 }
 

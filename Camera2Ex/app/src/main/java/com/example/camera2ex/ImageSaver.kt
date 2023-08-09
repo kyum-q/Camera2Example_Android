@@ -7,16 +7,14 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.media.Image
 import android.net.Uri
-import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Log
 import androidx.lifecycle.MutableLiveData
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
+import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.text.SimpleDateFormat
@@ -35,15 +33,19 @@ internal class ImageSaver(
      */
     private val context: Context,
 
-    private var pictureCount: MutableLiveData<Int>
+    private var pictureCount: MutableLiveData<Int>,
 
-) : Runnable {
+    ) : Runnable {
 
     override fun run() {
-        val bitmap = imageToBitmap(image) // Image to Bitmap
-        saveImageToGallery(bitmap) // Save Bitmap to Gallery
-        image.close() // Close the Image
 
+
+//        CoroutineScope(Dispatchers.IO).launch {
+            val bitmap = imageToBitmap(image) // Image to Bitmap
+            image.close() // Close the Image
+
+            saveImageToGallery(bitmap) // Save Bitmap to Gallery
+//        }
         CoroutineScope(Dispatchers.Main).launch {
             pictureCount.value = pictureCount.value!! + 1
         }
@@ -55,7 +57,7 @@ internal class ImageSaver(
         val bytes = ByteArray(buffer.remaining())
         buffer.get(bytes)
 
-        var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
 
         val matrix = bitmapRotation(bytes , 1)
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
@@ -99,5 +101,22 @@ internal class ImageSaver(
 //                context.showToast("Image saved to Gallery!")
             }
         }
+    }
+
+    private fun saveImageByteArray(image: Image) {
+        val buffer = image.planes[0].buffer
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+
+        val imageName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+//        val imageName = "MyImage.jpg" // 저장할 이미지 파일 이름
+
+        val imagePath = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+            .toString() + "/" + imageName
+
+        val fos = FileOutputStream(imagePath)
+        fos.write(bytes) // ByteArray의 이미지 데이터를 파일에 쓰기
+
+        fos.close()
     }
 }
