@@ -313,7 +313,6 @@ class CameraFragment : Fragment() {
 
         pictureCount.observe(viewLifecycleOwner) {
             if(!isDetectionChecked && it >= PICTURE_SIZE || isDetectionChecked && it >= objectDetectionModule.getIsDetectionSize()) {
-//                setAutoFocus()
                 mediaPlayer.start()
                 Toast.makeText(requireContext(), "촬영 완료", Toast.LENGTH_SHORT).show()
                 pictureCount.value = 0
@@ -348,7 +347,7 @@ class CameraFragment : Fragment() {
         // 메인 스레드를 방해하지 않기 위해 카메라 작업은 새로운 스레드 제작 후 해당 스레드에서 실행
         startBackgroundThread()
 
-        wantCameraDirection = CameraCharacteristics.LENS_FACING_FRONT
+        wantCameraDirection = CameraCharacteristics.LENS_FACING_BACK
 
         // texture 사용 가능한지 확인
         if (binding.texture.isAvailable) {
@@ -439,7 +438,7 @@ class CameraFragment : Fragment() {
 
                 // 렌즈 정보 알아낸 후, 후면 카메라가 아닐 시 continue (이를 통해 처음 켜지는 카메라는 무조건 적으로 후면 카메라)
                 val cameraDirection = characteristics.get(CameraCharacteristics.LENS_FACING)
-                if (cameraDirection == null || cameraDirection == wantCameraDirection) {
+                if (cameraDirection == null || cameraDirection != wantCameraDirection) {
                     continue
                 }
 
@@ -746,7 +745,7 @@ class CameraFragment : Fragment() {
     }
 
     /**
-     * 프리뷰 초점 수동으로 변경하고 초점 설정해서 촬영
+     * 프리뷰 초점 수동으로 변경했을 때 마지막에 자동 초점 촬영으로 변경
      */
     private fun setAutoFocus() {
         previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
@@ -940,7 +939,9 @@ private fun setTouchPointDistanceChange(x: Float, y: Float, halfTouchWidth: Int,
         private val MAX_PREVIEW_HEIGHT = 1080
     }
 
-    // 회전에 관한....!
+    /**
+     * 카메라 회전에 관한 함수
+     */
     private fun areDimensionsSwapped(displayRotation: Int): Boolean {
         var swappedDimensions = false
         when (displayRotation) {
